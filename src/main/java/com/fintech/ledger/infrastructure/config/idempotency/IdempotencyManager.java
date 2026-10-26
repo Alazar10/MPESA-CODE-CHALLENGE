@@ -9,7 +9,6 @@ import org.springframework.stereotype.Component;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
 import java.util.Map;
 import java.util.function.Supplier;
@@ -25,17 +24,7 @@ public class IdempotencyManager {
         this.objectMapper = objectMapper;
     }
 
-    public static class CachedResult {
-        public final int statusCode;
-        public final String responseBody;
-
-        public CachedResult(int statusCode, String responseBody) {
-            this.statusCode = statusCode;
-            this.responseBody = responseBody;
-        }
-    }
-
-    public <T> T execute(String key, String endpoint, Object requestBody, Supplier<T> operation) {
+    public <T> T execute(String key, String endpoint, Object requestBody, Class<T> responseType, Supplier<T> operation) {
         if (key == null || key.isBlank()) {
             throw new IllegalArgumentException("Idempotency-Key header is required");
         }
@@ -46,13 +35,11 @@ public class IdempotencyManager {
         String bodyHash = computeHash(requestBody);
 
         try {
-            
             jdbcTemplate.update(
                 "INSERT INTO idempotency_records (idempotency_key, endpoint, request_hash, status) VALUES (?, ?, ?, 'IN_PROGRESS')",
                 key, endpoint, bodyHash
             );
         } catch (DataIntegrityViolationException ex) {
-            
             Map<String, Object> row = jdbcTemplate.queryForMap(
                 "SELECT request_hash, status, response_code, response_body FROM idempotency_records WHERE idempotency_key = ?",
                 key
@@ -70,9 +57,7 @@ public class IdempotencyManager {
             }
 
             try {
-                @SuppressWarnings("unchecked")
-                Class<T> returnType = (Class<T>) operation.get().getClass();
-                return objectMapper.readValue((String) row.get("response_body"), returnType);
+                return objectMapper.readValue((String) row.get("response_body"), responseType);
             } catch (Exception parseEx) {
                 throw new RuntimeException("Failed to deserialize cached idempotent response", parseEx);
             }
@@ -82,7 +67,6 @@ public class IdempotencyManager {
         try {
             result = operation.get();
         } catch (RuntimeException e) {
-            
             jdbcTemplate.update("DELETE FROM idempotency_records WHERE idempotency_key = ?", key);
             throw e;
         }
