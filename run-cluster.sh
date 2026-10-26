@@ -1,28 +1,51 @@
 #!/usr/bin/env bash
 set -e
 
+APP_PIDS=()
+
 cleanup() {
-    echo "Stopping all processes..."
-    kill $(jobs -p) 2>/dev/null || true
+    local status=$?
+    trap - EXIT INT TERM
+    for pid in "${APP_PIDS[@]}"; do
+        kill "$pid" 2>/dev/null || true
+    done
+    for pid in "${APP_PIDS[@]}"; do
+        wait "$pid" 2>/dev/null || true
+    done
+    exit "$status"
 }
 trap cleanup EXIT INT TERM
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
-echo "1. Checking/Starting PostgreSQL..."
+echo "1. Checking/Starting PostgreSQL container..."
 docker rm -f mpesa-postgres 2>/dev/null || true
+
 docker run -d \
   --name mpesa-postgres \
   -e POSTGRES_DB=mpesa_db \
   -e POSTGRES_USER=postgres \
   -e POSTGRES_PASSWORD=postgrespassword \
   -p 5432:5432 \
+  -v mpesa_pgdata:/var/lib/postgresql/data \
   postgres:16-alpine
 
-echo "Waiting for PostgreSQL to be healthy..."
-until docker exec mpesa-postgres pg_isready -U postgres -d mpesa_db > /dev/null 2>&1; do
-    sleep 0.5
+echo "Waiting for mpesa_db to be fully initialized..."
+database_ready=false
+for i in {1..60}; do
+    if docker exec mpesa-postgres psql -U postgres -d mpesa_db -c "SELECT 1" > /dev/null 2>&1; then
+        database_ready=true
+        break
+    fi
+    sleep 1
 done
+if [[ "$database_ready" != true ]]; then
+    echo "PostgreSQL did not become ready within 60 seconds."
+    docker logs mpesa-postgres
+    exit 1
+fi
 
-echo "Applying Schema..."
+echo "Applying Schema & Seed Function..."
 docker exec -i mpesa-postgres psql -U postgres -d mpesa_db << 'EOF'
 CREATE TABLE IF NOT EXISTS wallets (
     wallet_id VARCHAR(32) PRIMARY KEY,
@@ -101,33 +124,57 @@ BEGIN
     VALUES ('M001', 'ACTIVE', 50000000, 0);
 END;
 $$ LANGUAGE plpgsql;
+
+SELECT reset_mpesa_state();
 EOF
 
-echo "Packaging application..."
+echo "Packaging jar (skipping tests during build)..."
 ./mvnw clean package -DskipTests
 
 echo "2. Starting Fake Bank on :9090..."
-java -cp target/classes:$(./mvnw dependency:build-classpath | grep -v '\[INFO\]' | tr '\n' ':') \
-     com.fintech.ledger.fakebank.FakeBankApplication > /dev/null 2>&1 &
-FAKE_BANK_PID=$!
+SERVER_PORT=9090 java -cp target/classes:$(./mvnw dependency:build-classpath | grep -v '\[INFO\]' | tr '\n' ':') \
+     com.fintech.ledger.fakebank.FakeBankApplication > fakebank.log 2>&1 &
+APP_PIDS+=("$!")
 
 echo "3. Starting Instance 1 on :8081..."
-SERVER_PORT=8081 java -jar target/ledger-0.0.1-SNAPSHOT.jar > /dev/null 2>&1 &
-INST1_PID=$!
+SERVER_PORT=8081 java -jar target/ledger-0.0.1-SNAPSHOT.jar > inst1.log 2>&1 &
+APP_PIDS+=("$!")
 
 echo "4. Starting Instance 2 on :8082..."
-SERVER_PORT=8082 java -jar target/ledger-0.0.1-SNAPSHOT.jar > /dev/null 2>&1 &
-INST2_PID=$!
+SERVER_PORT=8082 java -jar target/ledger-0.0.1-SNAPSHOT.jar > inst2.log 2>&1 &
+APP_PIDS+=("$!")
 
-echo "Waiting for services to become healthy..."
-until curl -s http://localhost:9090/bank/reconciliation/total > /dev/null; do sleep 0.5; done
-until curl -s http://localhost:8081/actuator/health > /dev/null 2>&1 || curl -s http://localhost:8081/mpesa/v1/wallets/W001 > /dev/null 2>&1; do sleep 0.5; done
-until curl -s http://localhost:8082/actuator/health > /dev/null 2>&1 || curl -s http://localhost:8082/mpesa/v1/wallets/W001 > /dev/null 2>&1; do sleep 0.5; done
+echo "Waiting for all services to become responsive..."
+services_ready=false
+for i in {1..60}; do
+    if curl -fsS http://localhost:9090/bank/reconciliation/total > /dev/null 2>&1 && \
+       curl -fsS http://localhost:8081/mpesa/v1/wallets/W001 > /dev/null 2>&1 && \
+       curl -fsS http://localhost:8082/mpesa/v1/wallets/W001 > /dev/null 2>&1; then
+        services_ready=true
+        echo "All instances are ready!"
+        break
+    fi
+    for pid in "${APP_PIDS[@]}"; do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            echo "A service exited before the cluster became ready."
+            tail -n 40 fakebank.log inst1.log inst2.log
+            exit 1
+        fi
+    done
+    sleep 1
+done
+if [[ "$services_ready" != true ]]; then
+    echo "Services did not become ready within 60 seconds."
+    tail -n 40 fakebank.log inst1.log inst2.log
+    exit 1
+fi
 
-echo "All 3 services are UP and listening:"
-echo " - Fake Bank:  http://localhost:9090"
-echo " - Instance 1: http://localhost:8081"
-echo " - Instance 2: http://localhost:8082"
-
-# Keep cluster alive if run directly
-wait
+while true; do
+    for pid in "${APP_PIDS[@]}"; do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            echo "A service exited while the cluster was running."
+            exit 1
+        fi
+    done
+    sleep 1
+done

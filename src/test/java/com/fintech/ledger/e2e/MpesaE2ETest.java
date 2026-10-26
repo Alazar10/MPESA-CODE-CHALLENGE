@@ -41,8 +41,6 @@ public class MpesaE2ETest {
         return mapper.readTree(res);
     }
 
-    // S1.1: 200 concurrent transfers of 10,000 from W001 to random wallets, split across both instances.
-    // Passes when: Exactly 100 return 201 and 100 return 422. W001 balance is 0. Sum of all balances unchanged.
     @Test
     @Order(1)
     void test_S1_1_ConcurrentTransfersUntilEmpty() throws Exception {
@@ -85,7 +83,6 @@ public class MpesaE2ETest {
                 } catch (HttpClientErrorException.UnprocessableEntity ex) {
                     failCount.incrementAndGet();
                 } catch (Exception ex) {
-                    // unexpected
                 } finally {
                     doneLatch.countDown();
                 }
@@ -103,8 +100,6 @@ public class MpesaE2ETest {
         assertEquals(0L, w001.get("balance").asLong(), "W001 balance must be exactly 0");
     }
 
-    // S1.2: 20 concurrent identical requests with one Idempotency-Key across both instances, then one more after all finish
-    // Passes when: W001 debited once. Every 201 carries the same transfer_id.
     @Test
     @Order(2)
     void test_S1_2_ConcurrentIdempotentRequests() throws Exception {
@@ -143,7 +138,7 @@ public class MpesaE2ETest {
                         transferIds.add(json.get("transfer_id").asText());
                     }
                 } catch (HttpClientErrorException.Conflict ex) {
-                    inProgressCount.incrementAndGet(); // 409 REQUEST_IN_PROGRESS
+                    inProgressCount.incrementAndGet();
                 } catch (Exception ignored) {
                 } finally {
                     doneLatch.countDown();
@@ -155,7 +150,6 @@ public class MpesaE2ETest {
         assertTrue(doneLatch.await(15, TimeUnit.SECONDS));
         pool.shutdown();
 
-        // One after all finish
         ResponseEntity<String> postRes = client1.post()
                 .uri("/mpesa/v1/p2p/transfers")
                 .header("Idempotency-Key", commonKey)
@@ -168,19 +162,15 @@ public class MpesaE2ETest {
         String finalTxId = mapper.readTree(postRes.getBody()).get("transfer_id").asText();
         transferIds.add(finalTxId);
 
-        // Assert all completed 201s carry the exact same transfer_id
         String expectedId = transferIds.get(0);
         for (String id : transferIds) {
             assertEquals(expectedId, id, "Every 201 must carry the identical transfer_id");
         }
 
-        // W001 must have been debited exactly once
         JsonNode w001 = getWallet(INST1, "W001");
         assertEquals(950000L, w001.get("balance").asLong());
     }
 
-    // S1.3: 50 transfers W001->W002 and 50 W002->W001 of 1,000, all concurrent
-    // Passes when: All 100 return 201 within 10s. Zero 5xx. Both end at 1,000,000.
     @Test
     @Order(3)
     void test_S1_3_CrossTransfersDeadlockFreedom() throws Exception {
@@ -220,7 +210,6 @@ public class MpesaE2ETest {
                         successCount.incrementAndGet();
                     }
                 } catch (Exception ex) {
-                    // fail
                 } finally {
                     doneLatch.countDown();
                 }
@@ -239,12 +228,9 @@ public class MpesaE2ETest {
         assertEquals(1000000L, w2.get("balance").asLong());
     }
 
-    // S2.1: 30 concurrent reversals of one transfer across both instances
-    // Passes when: Exactly one 200, 29 409. Money moved once.
     @Test
     @Order(4)
     void test_S2_1_ConcurrentReversals() throws Exception {
-        // Execute initial transfer
         Map<String, Object> req = Map.of("from_wallet", "W001", "to_wallet", "W002", "amount", 50000, "reference", "rev-target");
         String res = client1.post()
                 .uri("/mpesa/v1/p2p/transfers")
@@ -298,8 +284,6 @@ public class MpesaE2ETest {
         assertEquals(1000000L, w2.get("balance").asLong());
     }
 
-    // S2.3: W030 sends 5,000 to W031, W030 is frozen, transfer is reversed
-    // Passes when: Reversal succeeds and credits W030.
     @Test
     @Order(5)
     void test_S2_3_ReversalToFrozenWallet() throws Exception {
@@ -313,7 +297,6 @@ public class MpesaE2ETest {
                 .body(String.class);
         String transferId = mapper.readTree(res).get("transfer_id").asText();
 
-        // Freeze W030
         client2.put()
                 .uri("/mpesa/v1/wallets/W030/status")
                 .contentType(MediaType.APPLICATION_JSON)
@@ -321,7 +304,6 @@ public class MpesaE2ETest {
                 .retrieve()
                 .toBodilessEntity();
 
-        // Reverse transfer
         ResponseEntity<String> revRes = client1.post()
                 .uri("/mpesa/v1/p2p/transfers/" + transferId + "/reversal")
                 .contentType(MediaType.APPLICATION_JSON)

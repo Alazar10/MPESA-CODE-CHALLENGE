@@ -50,7 +50,6 @@ public class PayoutService {
                 .build();
     }
 
-    // Step 1: Synchronous Reservation in DB (Runs in <5ms, answers 202 under 500ms p95)
     @Transactional(rollbackFor = Exception.class)
     public PayoutAcceptedResponse reserveAndCreatePayout(PayoutSubmitRequest req) {
         WalletJpaEntity wallet = walletRepository.findByIdForUpdate(req.walletId())
@@ -66,7 +65,6 @@ public class PayoutService {
             );
         }
 
-        // Reserve funds (available drops, balance does not)
         wallet.setReserved(wallet.getReserved() + req.amount());
         walletRepository.save(wallet);
 
@@ -74,13 +72,11 @@ public class PayoutService {
         PayoutJpaEntity payout = new PayoutJpaEntity(payoutId, req.walletId(), req.bankAccount(), req.amount(), "PENDING");
         payoutRepository.save(payout);
 
-        // Async submit to fake bank completely detached from DB connection
         CompletableFuture.runAsync(() -> submitToBankAsync(payoutId, req.bankAccount(), req.amount()), bankSubmitExecutor);
 
         return new PayoutAcceptedResponse(payoutId, "PENDING");
     }
 
-    // Step 2: Bank Submission over HTTP (Out-of-transaction)
     public void submitToBankAsync(String payoutId, String bankAccount, long amount) {
         try {
             Map<String, Object> body = Map.of("payout_id", payoutId, "bank_account", bankAccount, "amount", amount);
@@ -104,7 +100,6 @@ public class PayoutService {
             }
         } catch (Exception ex) {
             log.warn("Bank call failed or timed out for {}: {}. Outcome unknown, will reconcile.", payoutId, ex.getMessage());
-            // Section 4.1: Unknown is not failure. Wait for callback or reconciliation.
         }
     }
 
@@ -119,14 +114,11 @@ public class PayoutService {
         });
     }
 
-    // Step 3: Handle Callback from Bank (POST /mpesa/v1/callbacks/bank)
     @Transactional(rollbackFor = Exception.class)
     public void handleBankCallback(BankCallbackRequest req) {
-        // Dedup event_id (Section 4.3: About 30% arrive 2 or 3 times concurrently)
         try {
             jdbcTemplate.update("INSERT INTO bank_callback_events (event_id, payout_id) VALUES (?, ?)", req.eventId(), req.payoutId());
         } catch (DataIntegrityViolationException dup) {
-            // Duplicate event_id received: ignore cleanly with 200
             return;
         }
 
@@ -138,7 +130,6 @@ public class PayoutService {
         PayoutJpaEntity payout = payoutRepository.findByIdForUpdate(payoutId)
                 .orElseThrow(() -> new ResourceNotFoundException("PAYOUT_NOT_FOUND", "Payout " + payoutId + " not found"));
 
-        // Final states: SUCCEEDED, FAILED (Section 5.5)
         if ("SUCCEEDED".equalsIgnoreCase(payout.getStatus()) || "FAILED".equalsIgnoreCase(payout.getStatus())) {
             if (!payout.getStatus().equalsIgnoreCase(newStatus)) {
                 payout.setConflict(true);
@@ -155,7 +146,6 @@ public class PayoutService {
             wallet.setReserved(wallet.getReserved() - payout.getAmount());
             payout.setStatus("SUCCEEDED");
         } else {
-            // FAILED or REJECTED: release reservation only
             wallet.setReserved(wallet.getReserved() - payout.getAmount());
             payout.setStatus("FAILED");
         }
@@ -183,7 +173,6 @@ public class PayoutService {
         );
     }
 
-    // Step 4: Background Reconciler (Ensures finality within 2 minutes under instance crash or 60s timeout)
     @Scheduled(fixedDelay = 5000)
     public void reconcileStalePayouts() {
         Instant cutoff = Instant.now().minus(Duration.ofSeconds(10));

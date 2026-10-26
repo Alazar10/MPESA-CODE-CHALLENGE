@@ -36,7 +36,6 @@ public class FakeBankApplication {
     private final RestClient restClient = RestClient.builder().build();
     private final Random random = new Random();
 
-    // Configurable rates for test harness (Section IV, B3)
     private volatile double acceptedRate = 0.80;
     private volatile double rejectedRate = 0.08;
     private volatile double noResponseRate = 0.12;
@@ -72,7 +71,6 @@ public class FakeBankApplication {
 
     @PostMapping("/bank/payouts")
     public ResponseEntity<Map<String, String>> submitPayout(@RequestBody PayoutRequest req) throws InterruptedException {
-        // Idempotency check on payout_id (Section 4.1)
         PayoutRecord existing = payouts.get(req.payoutId());
         if (existing != null) {
             if (existing.amount() != req.amount()) {
@@ -84,15 +82,12 @@ public class FakeBankApplication {
             return ResponseEntity.ok(Map.of("result", "ACCEPTED", "bank_ref", existing.bankRef()));
         }
 
-        // Determine outcome
         double roll = random.nextDouble();
         if (roll < noResponseRate) {
-            // 60s hang then 504
             TimeUnit.SECONDS.sleep(60);
             return ResponseEntity.status(HttpStatus.GATEWAY_TIMEOUT).build();
         }
 
-        // Latency 2-6 seconds
         int delay = 2000 + random.nextInt(4001);
         Thread.sleep(delay);
 
@@ -101,11 +96,9 @@ public class FakeBankApplication {
             return ResponseEntity.ok(Map.of("result", "REJECTED", "reason", "BENEFICIARY_ACCOUNT_INVALID"));
         }
 
-        // ACCEPTED
         String bankRef = "BR" + UUID.randomUUID().toString().replace("-", "").substring(0, 16).toUpperCase();
         payouts.put(req.payoutId(), new PayoutRecord(req.payoutId(), req.bankAccount(), req.amount(), "IN_PROGRESS", bankRef));
 
-        // Schedule callback: 1-10 seconds later
         int callbackDelay = 1 + random.nextInt(10);
         boolean succeeds = random.nextDouble() >= acceptedFailRate;
         String finalStatus = succeeds ? "SUCCEEDED" : "FAILED";
@@ -123,7 +116,7 @@ public class FakeBankApplication {
 
     @GetMapping("/bank/payouts/{payoutId}")
     public ResponseEntity<Map<String, String>> getPayout(@PathVariable("payoutId") String payoutId) throws InterruptedException {
-        Thread.sleep(1000 + random.nextInt(2001)); // 1 to 3 seconds
+        Thread.sleep(1000 + random.nextInt(2001));
         PayoutRecord rec = payouts.get(payoutId);
         if (rec == null) {
             return ResponseEntity.ok(Map.of("status", "NOT_FOUND"));

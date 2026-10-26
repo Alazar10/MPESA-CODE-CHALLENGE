@@ -39,7 +39,6 @@ public class TransferService {
             throw new SameWalletException("Source and destination wallets must be different");
         }
 
-        // Ordered locking by wallet_id prevents deadlocks (S1.3)
         List<String> sortedIds = List.of(request.fromWallet(), request.toWallet()).stream()
                 .sorted()
                 .toList();
@@ -71,7 +70,6 @@ public class TransferService {
             );
         }
 
-        // Atomic balance shift
         from.setBalance(from.getBalance() - request.amount());
         to.setBalance(to.getBalance() + request.amount());
 
@@ -109,9 +107,8 @@ public class TransferService {
             throw new NotReversibleException("Transfer " + transferId + " is not in COMPLETED status");
         }
 
-        // Lock in alphabetical order
-        String originalFrom = transfer.getFromWallet(); // Receiver in reversal
-        String originalTo = transfer.getToWallet();     // Debited in reversal
+        String originalFrom = transfer.getFromWallet();
+        String originalTo = transfer.getToWallet();
 
         List<String> sortedIds = List.of(originalFrom, originalTo).stream().sorted().toList();
         List<WalletJpaEntity> locked = walletRepository.findAllByIdInForUpdateOrderById(sortedIds);
@@ -125,21 +122,16 @@ public class TransferService {
             throw new ResourceNotFoundException("WALLET_NOT_FOUND", "One or both wallets not found");
         }
 
-        // Debited wallet must be ACTIVE
         if (!"ACTIVE".equalsIgnoreCase(debitedWallet.getStatus())) {
             throw new WalletNotActiveException("Debited wallet " + debitedWallet.getWalletId() + " is not ACTIVE");
         }
 
-        // Debited wallet must have sufficient available funds
         if (debitedWallet.getAvailable() < transfer.getAmount()) {
             throw new InsufficientFundsException(
                 debitedWallet.getWalletId() + " available " + debitedWallet.getAvailable() + ", requested " + transfer.getAmount()
             );
         }
 
-        // Credited wallet can be FROZEN (Section 5.2)
-
-        // Atomic conditional update to guard concurrent race (S2.1)
         int updated = transferRepository.markReversedIfCompleted(transferId);
         if (updated == 0) {
             throw new AlreadyReversedException("Transfer " + transferId + " was concurrently reversed");
