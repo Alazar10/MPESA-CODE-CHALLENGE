@@ -2,20 +2,26 @@ package com.fintech.ledger.fakebank;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
 import org.springframework.boot.SpringApplication;
-import org.springframework.boot.autoconfigure.SpringBootApplication;
-import org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration;
-import org.springframework.boot.autoconfigure.orm.jpa.HibernateJpaAutoConfiguration;
+import org.springframework.boot.autoconfigure.EnableAutoConfiguration;
+import org.springframework.context.annotation.Configuration;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.client.RestClient;
 
-import java.time.Duration;
-import java.util.*;
+import java.util.Map;
+import java.util.Random;
+import java.util.UUID;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicLong;
 
-@SpringBootApplication(exclude = {DataSourceAutoConfiguration.class, HibernateJpaAutoConfiguration.class})
+@Configuration
+@EnableAutoConfiguration(excludeName = {
+    "org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration",
+    "org.springframework.boot.jdbc.autoconfigure.DataSourceAutoConfiguration",
+    "org.springframework.boot.autoconfigure.orm.jpa.HibernateJpaAutoConfiguration",
+    "org.springframework.boot.data.jpa.autoconfigure.HibernateJpaAutoConfiguration"
+})
 @RestController
 public class FakeBankApplication {
 
@@ -30,7 +36,7 @@ public class FakeBankApplication {
     private final RestClient restClient = RestClient.builder().build();
     private final Random random = new Random();
 
-    // Configurable rates for test harness (B3)
+    // Configurable rates for test harness (Section IV, B3)
     private volatile double acceptedRate = 0.80;
     private volatile double rejectedRate = 0.08;
     private volatile double noResponseRate = 0.12;
@@ -135,4 +141,28 @@ public class FakeBankApplication {
         }
     }
 
-    private void sendWithRetry(CallbackPayload payload)
+    private void sendWithRetry(CallbackPayload payload) {
+        int[] targetPorts = {8081, 8082};
+        int port = targetPorts[random.nextInt(targetPorts.length)];
+        String url = "http://localhost:" + port + "/mpesa/v1/callbacks/bank";
+
+        for (int attempt = 1; attempt <= 5; attempt++) {
+            try {
+                ResponseEntity<Void> res = restClient.post()
+                        .uri(url)
+                        .body(payload)
+                        .retrieve()
+                        .toBodilessEntity();
+                if (res.getStatusCode().is2xxSuccessful()) {
+                    return;
+                }
+            } catch (Exception ignored) {}
+            try {
+                TimeUnit.SECONDS.sleep(3);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+        }
+    }
+}
